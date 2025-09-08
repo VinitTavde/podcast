@@ -260,7 +260,6 @@ class VibeVoiceDemo:
                     tokenizer=processor.tokenizer,
                     generation_config={'do_sample': False},
                     verbose=False,
-                    show_progress_bar=False,
                 )
             finally:
                 # Restore original tqdm
