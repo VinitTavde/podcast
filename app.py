@@ -106,12 +106,15 @@ class VibeVoiceDemo:
                          speaker_3: str = None,
                          speaker_4: str = None,
                          cfg_scale: float = 1.3,
-                         model_name: str = None):
+                         model_name: str = None,
+                         progress=gr.Progress()):
         """
         Generates a podcast as a single audio file from a script and saves it.
         Non-streaming.
         """
         try:
+            progress(0.0, desc="🎙️ Preparing podcast generation...")
+            
             # pick model
             model_name = model_name or self.current_model_name
             if model_name not in self.models:
@@ -132,7 +135,7 @@ class VibeVoiceDemo:
             if not script.strip():
                 raise gr.Error("Error: Please provide a script.")
 
-            script = script.replace("’", "'")
+            script = script.replace("'", "'")
 
             if not 1 <= num_speakers <= 4:
                 raise gr.Error("Error: Number of speakers must be between 1 and 4.")
@@ -181,15 +184,91 @@ class VibeVoiceDemo:
                 return_attention_mask=True,
             )
 
+            progress(0.0, desc="🎵 Starting AI speech generation...")
             start_time = time.time()
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=None,
-                cfg_scale=cfg_scale,
-                tokenizer=processor.tokenizer,
-                generation_config={'do_sample': False},
-                verbose=False,
-            )
+            
+            # Create a custom progress callback that integrates with Gradio
+            class GradioProgressCallback:
+                def __init__(self, gradio_progress, total_steps):
+                    self.gradio_progress = gradio_progress
+                    self.total_steps = total_steps
+                    self.current_step = 0
+                
+                def update(self, step, desc=""):
+                    self.current_step = step
+                    progress_value = min(step / self.total_steps, 1.0)
+                    percentage = int(progress_value * 100)
+                    progress_desc = f"🎵 AI Generating speech... {percentage}% ({step}/{self.total_steps})"
+                    if desc:
+                        progress_desc += f" - {desc}"
+                    self.gradio_progress(progress_value, desc=progress_desc)
+            
+            # Estimate total steps for progress tracking
+            # The model uses max_steps which is typically much larger than inference_steps
+            # We'll use a reasonable estimate based on the script length
+            script_length = len(formatted_script.split())
+            estimated_steps = min(script_length * 2, 200)  # Reasonable upper bound
+            
+            progress_callback = GradioProgressCallback(progress, estimated_steps)
+            
+            # Monkey patch the model's tqdm progress bar to use our callback
+            original_tqdm = __import__('tqdm').tqdm
+            
+            def custom_tqdm(iterable, desc="Generating", leave=False, **kwargs):
+                # Create a custom iterator that calls our progress callback
+                class ProgressIterator:
+                    def __init__(self, iterable, callback, total):
+                        self.iterable = iterable
+                        self.callback = callback
+                        self.total = total
+                        self.current = 0
+                    
+                    def __iter__(self):
+                        for item in self.iterable:
+                            self.current += 1
+                            self.callback.update(self.current, f"Processing step {self.current}")
+                            yield item
+                    
+                    def __len__(self):
+                        return self.total
+                
+                return ProgressIterator(iterable, progress_callback, len(iterable))
+            
+            # Temporarily replace tqdm
+            import tqdm
+            tqdm.tqdm = custom_tqdm
+            
+            try:
+                # Start the actual generation with progress tracking
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=None,
+                    cfg_scale=cfg_scale,
+                    tokenizer=processor.tokenizer,
+                    generation_config={'do_sample': False},
+                    verbose=True,  # Enable verbose to get progress updates
+                    show_progress_bar=True,  # Enable the progress bar
+                )
+            except Exception as e:
+                # If there's an error with the custom progress, fall back to simple progress
+                print(f"Custom progress failed, using fallback: {e}")
+                progress(0.5, desc="🎵 AI Generating speech... (fallback mode)")
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=None,
+                    cfg_scale=cfg_scale,
+                    tokenizer=processor.tokenizer,
+                    generation_config={'do_sample': False},
+                    verbose=False,
+                    show_progress_bar=False,
+                )
+            finally:
+                # Restore original tqdm
+                tqdm.tqdm = original_tqdm
+            
+            # Final progress update
+            progress(1.0, desc="🎵 AI speech generation complete!")
+            
             generation_time = time.time() - start_time
 
             if hasattr(outputs, 'speech_outputs') and outputs.speech_outputs[0] is not None:
@@ -287,8 +366,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
 
         gr.HTML("""
         <div class="main-header">
-            <h1>🎙️ Vibe Podcasting</h1>
-            <p>Generating Long-form Multi-speaker AI Podcast with VibeVoice</p>
+            <h1>🎙️Podcasting</h1>
         </div>
         """)
 
@@ -353,6 +431,9 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         variant="primary", elem_classes="generate-btn", scale=2
                     )
 
+                # Progress bar
+                progress_bar = gr.Progress()
+
                 gr.Markdown("### 🎵 Generated Podcast")
                 complete_audio_output = gr.Audio(
                     label="Complete Podcast (Download)",
@@ -379,7 +460,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
             outputs=speaker_selections
         )
 
-        def generate_podcast_wrapper(model_choice, num_speakers, script, *speakers_and_params):
+        def generate_podcast_wrapper(model_choice, num_speakers, script, *speakers_and_params, progress=gr.Progress()):
             try:
                 speakers = speakers_and_params[:4]
                 cfg_scale_val = speakers_and_params[4]
@@ -391,7 +472,8 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     speaker_3=speakers[2],
                     speaker_4=speakers[3],
                     cfg_scale=cfg_scale_val,
-                    model_name=model_choice
+                    model_name=model_choice,
+                    progress=progress
                 )
                 return audio, log
             except Exception as e:
@@ -402,36 +484,10 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
             fn=generate_podcast_wrapper,
             inputs=[model_dropdown, num_speakers, script_input] + speaker_selections + [cfg_scale],
             outputs=[complete_audio_output, log_output],
-            queue=True
+            queue=True,
+            show_progress=True
         )
-
-        def load_random_example():
-            import random
-            examples = getattr(demo_instance, "example_scripts", [])
-            if not examples:
-                examples = [
-                    [2, "Speaker 0: Welcome to our AI podcast demo!\nSpeaker 1: Thanks, excited to be here!"]
-                ]
-            num_speakers_value, script_value = random.choice(examples)
-            return num_speakers_value, script_value
-
-        random_example_btn.click(
-            fn=load_random_example,
-            inputs=[],
-            outputs=[num_speakers, script_input],
-            queue=False
-        )
-
-        gr.Markdown("### 📚 Example Scripts")
-        examples = getattr(demo_instance, "example_scripts", []) or [
-            [1, "Speaker 1: Welcome to our AI podcast demo. This is a sample script."]
-        ]
-        gr.Examples(
-            examples=examples,
-            inputs=[num_speakers, script_input],
-            label="Try these example scripts:"
-        )
-
+        
     return interface
 
 
