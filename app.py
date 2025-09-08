@@ -106,15 +106,12 @@ class VibeVoiceDemo:
                          speaker_3: str = None,
                          speaker_4: str = None,
                          cfg_scale: float = 1.3,
-                         model_name: str = None,
-                         progress=gr.Progress()):
+                         model_name: str = None):
         """
         Generates a podcast as a single audio file from a script and saves it.
         Non-streaming.
         """
         try:
-            progress(0.0, desc="🎙️ Preparing podcast generation...")
-            
             # pick model
             model_name = model_name or self.current_model_name
             if model_name not in self.models:
@@ -135,7 +132,7 @@ class VibeVoiceDemo:
             if not script.strip():
                 raise gr.Error("Error: Please provide a script.")
 
-            script = script.replace("'", "'")
+            script = script.replace("’", "'")
 
             if not 1 <= num_speakers <= 4:
                 raise gr.Error("Error: Number of speakers must be between 1 and 4.")
@@ -184,63 +181,15 @@ class VibeVoiceDemo:
                 return_attention_mask=True,
             )
 
-            progress(0.0, desc="🎵 Starting AI speech generation...")
             start_time = time.time()
-            
-            # Simple and robust progress tracking
-            import threading
-            import time as time_module
-            
-            # Create a progress updater that runs in a separate thread
-            progress_active = threading.Event()
-            progress_active.set()
-            progress_step = 0
-            
-            def progress_updater():
-                nonlocal progress_step
-                while progress_active.is_set():
-                    progress_step += 1
-                    progress_value = min(progress_step / 50, 0.95)  # Cap at 95% until completion
-                    percentage = int(progress_value * 100)
-                    progress(progress_value, desc=f"🎵 AI Generating speech... {percentage}% (Processing)")
-                    time_module.sleep(0.8)  # Update every 800ms
-            
-            # Start progress updater thread
-            progress_thread = threading.Thread(target=progress_updater, daemon=True)
-            progress_thread.start()
-            
-            try:
-                # Start the actual generation with minimal parameters to avoid conflicts
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=None,
-                    cfg_scale=cfg_scale,
-                    tokenizer=processor.tokenizer,
-                )
-            except Exception as e:
-                # If there's still an error, try with even more minimal parameters
-                print(f"Generation failed, trying ultra-minimal approach: {e}")
-                progress(0.5, desc="🎵 AI Generating speech... (ultra-minimal mode)")
-                # Remove potentially problematic parameters
-                minimal_inputs = {
-                    'input_ids': inputs['input_ids'],
-                    'attention_mask': inputs['attention_mask'],
-                }
-                outputs = model.generate(
-                    **minimal_inputs,
-                    max_new_tokens=None,
-                    cfg_scale=cfg_scale,
-                    tokenizer=processor.tokenizer,
-                )
-            finally:
-                # Stop progress updater
-                progress_active.clear()
-                if progress_thread.is_alive():
-                    progress_thread.join(timeout=1.0)
-            
-            # Final progress update
-            progress(1.0, desc="🎵 AI speech generation complete!")
-            
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=None,
+                cfg_scale=cfg_scale,
+                tokenizer=processor.tokenizer,
+                generation_config={'do_sample': False},
+                verbose=False,
+            )
             generation_time = time.time() - start_time
 
             if hasattr(outputs, 'speech_outputs') and outputs.speech_outputs[0] is not None:
@@ -338,7 +287,8 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
 
         gr.HTML("""
         <div class="main-header">
-            <h1>🎙️Podcasting</h1>
+            <h1>🎙️ Vibe Podcasting</h1>
+            <p>Generating Long-form Multi-speaker AI Podcast with VibeVoice</p>
         </div>
         """)
 
@@ -403,9 +353,6 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         variant="primary", elem_classes="generate-btn", scale=2
                     )
 
-                # Progress bar
-                progress_bar = gr.Progress()
-
                 gr.Markdown("### 🎵 Generated Podcast")
                 complete_audio_output = gr.Audio(
                     label="Complete Podcast (Download)",
@@ -432,7 +379,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
             outputs=speaker_selections
         )
 
-        def generate_podcast_wrapper(model_choice, num_speakers, script, *speakers_and_params, progress=gr.Progress()):
+        def generate_podcast_wrapper(model_choice, num_speakers, script, *speakers_and_params):
             try:
                 speakers = speakers_and_params[:4]
                 cfg_scale_val = speakers_and_params[4]
@@ -444,8 +391,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     speaker_3=speakers[2],
                     speaker_4=speakers[3],
                     cfg_scale=cfg_scale_val,
-                    model_name=model_choice,
-                    progress=progress
+                    model_name=model_choice
                 )
                 return audio, log
             except Exception as e:
@@ -456,10 +402,36 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
             fn=generate_podcast_wrapper,
             inputs=[model_dropdown, num_speakers, script_input] + speaker_selections + [cfg_scale],
             outputs=[complete_audio_output, log_output],
-            queue=True,
-            show_progress=True
+            queue=True
         )
-        
+
+        # def load_random_example():
+        #     import random
+        #     examples = getattr(demo_instance, "example_scripts", [])
+        #     if not examples:
+        #         examples = [
+        #             [2, "Speaker 0: Welcome to our AI podcast demo!\nSpeaker 1: Thanks, excited to be here!"]
+        #         ]
+        #     num_speakers_value, script_value = random.choice(examples)
+        #     return num_speakers_value, script_value
+
+        # random_example_btn.click(
+        #     fn=load_random_example,
+        #     inputs=[],
+        #     outputs=[num_speakers, script_input],
+        #     queue=False
+        # )
+
+        # gr.Markdown("### 📚 Example Scripts")
+        # examples = getattr(demo_instance, "example_scripts", []) or [
+        #     [1, "Speaker 1: Welcome to our AI podcast demo. This is a sample script."]
+        # ]
+        # gr.Examples(
+        #     examples=examples,
+        #     inputs=[num_speakers, script_input],
+        #     label="Try these example scripts:"
+        # )
+
     return interface
 
 
