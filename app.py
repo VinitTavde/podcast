@@ -247,7 +247,6 @@ class VibeVoiceDemo:
                     tokenizer=processor.tokenizer,
                     generation_config={'do_sample': False},
                     verbose=True,  # Enable verbose to get progress updates
-                    show_progress_bar=True,  # Enable the progress bar
                 )
             except Exception as e:
                 # If there's an error with the custom progress, fall back to simple progress
