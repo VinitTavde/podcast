@@ -187,82 +187,56 @@ class VibeVoiceDemo:
             progress(0.0, desc="🎵 Starting AI speech generation...")
             start_time = time.time()
             
-            # Create a custom progress callback that integrates with Gradio
-            class GradioProgressCallback:
-                def __init__(self, gradio_progress, total_steps):
-                    self.gradio_progress = gradio_progress
-                    self.total_steps = total_steps
-                    self.current_step = 0
-                
-                def update(self, step, desc=""):
-                    self.current_step = step
-                    progress_value = min(step / self.total_steps, 1.0)
+            # Simple and robust progress tracking
+            import threading
+            import time as time_module
+            
+            # Create a progress updater that runs in a separate thread
+            progress_active = threading.Event()
+            progress_active.set()
+            progress_step = 0
+            
+            def progress_updater():
+                nonlocal progress_step
+                while progress_active.is_set():
+                    progress_step += 1
+                    progress_value = min(progress_step / 50, 0.95)  # Cap at 95% until completion
                     percentage = int(progress_value * 100)
-                    progress_desc = f"🎵 AI Generating speech... {percentage}% ({step}/{self.total_steps})"
-                    if desc:
-                        progress_desc += f" - {desc}"
-                    self.gradio_progress(progress_value, desc=progress_desc)
+                    progress(progress_value, desc=f"🎵 AI Generating speech... {percentage}% (Processing)")
+                    time_module.sleep(0.8)  # Update every 800ms
             
-            # Estimate total steps for progress tracking
-            # The model uses max_steps which is typically much larger than inference_steps
-            # We'll use a reasonable estimate based on the script length
-            script_length = len(formatted_script.split())
-            estimated_steps = min(script_length * 2, 200)  # Reasonable upper bound
-            
-            progress_callback = GradioProgressCallback(progress, estimated_steps)
-            
-            # Monkey patch the model's tqdm progress bar to use our callback
-            original_tqdm = __import__('tqdm').tqdm
-            
-            def custom_tqdm(iterable, desc="Generating", leave=False, **kwargs):
-                # Create a custom iterator that calls our progress callback
-                class ProgressIterator:
-                    def __init__(self, iterable, callback, total):
-                        self.iterable = iterable
-                        self.callback = callback
-                        self.total = total
-                        self.current = 0
-                    
-                    def __iter__(self):
-                        for item in self.iterable:
-                            self.current += 1
-                            self.callback.update(self.current, f"Processing step {self.current}")
-                            yield item
-                    
-                    def __len__(self):
-                        return self.total
-                
-                return ProgressIterator(iterable, progress_callback, len(iterable))
-            
-            # Temporarily replace tqdm
-            import tqdm
-            tqdm.tqdm = custom_tqdm
+            # Start progress updater thread
+            progress_thread = threading.Thread(target=progress_updater, daemon=True)
+            progress_thread.start()
             
             try:
-                # Start the actual generation with progress tracking
+                # Start the actual generation with minimal parameters to avoid conflicts
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=None,
                     cfg_scale=cfg_scale,
                     tokenizer=processor.tokenizer,
-                    generation_config={'do_sample': False},
-                    verbose=True,  # Enable verbose to get progress updates
                 )
             except Exception as e:
-                # If there's an error with the custom progress, fall back to simple progress
-                print(f"Custom progress failed, using fallback: {e}")
-                progress(0.5, desc="🎵 AI Generating speech... (fallback mode)")
+                # If there's still an error, try with even more minimal parameters
+                print(f"Generation failed, trying ultra-minimal approach: {e}")
+                progress(0.5, desc="🎵 AI Generating speech... (ultra-minimal mode)")
+                # Remove potentially problematic parameters
+                minimal_inputs = {
+                    'input_ids': inputs['input_ids'],
+                    'attention_mask': inputs['attention_mask'],
+                }
                 outputs = model.generate(
-                    **inputs,
+                    **minimal_inputs,
                     max_new_tokens=None,
                     cfg_scale=cfg_scale,
                     tokenizer=processor.tokenizer,
-                    generation_config={'do_sample': False},
-                    verbose=False,
                 )
             finally:
-                # Restore original tqdm
-                tqdm.tqdm = original_tqdm
+                # Stop progress updater
+                progress_active.clear()
+                if progress_thread.is_alive():
+                    progress_thread.join(timeout=1.0)
             
             # Final progress update
             progress(1.0, desc="🎵 AI speech generation complete!")
