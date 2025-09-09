@@ -357,7 +357,10 @@ class VibeVoiceForConditionalGeneration(VibeVoicePreTrainedModel):
         
         x = self.get_input_embeddings()(input_ids)
 
-        semantic_speech_all_connect_features = self.model.semantic_connector(speech_semantic_tensors)
+        if speech_semantic_tensors is not None:
+            semantic_speech_all_connect_features = self.model.semantic_connector(speech_semantic_tensors)
+        else:
+            semantic_speech_all_connect_features = None
         if speeches_loss_input is not None:
             # only part audio need diffuse
             speech_all_features, speech_all_connect_features = self.forward_speech_features(
