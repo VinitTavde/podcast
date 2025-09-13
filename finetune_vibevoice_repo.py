@@ -34,8 +34,15 @@ from torch.utils.data import Dataset, DataLoader
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
 from accelerate import Accelerator, DeepSpeedPlugin
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-import bitsandbytes as bnb
+
+# Optional imports for PEFT and quantization
+try:
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    import bitsandbytes as bnb
+    HAS_PEFT = True
+except ImportError:
+    print("Warning: PEFT and bitsandbytes not available. QLoRA features will be disabled.")
+    HAS_PEFT = False
 
 # Try to import repo processor and model (safe fallback)
 try:
@@ -288,7 +295,10 @@ def main():
         # Use a simple Qwen2 model instead of full VibeVoice
         simple_model_path = "Qwen/Qwen2.5-1.5B"  # or another lightweight model
         tokenizer = AutoTokenizer.from_pretrained(simple_model_path, use_fast=True)
-        model = AutoModelForCausalLM.from_pretrained(simple_model_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+        if HAS_PEFT:
+            model = AutoModelForCausalLM.from_pretrained(simple_model_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(simple_model_path, trust_remote_code=True, device_map="auto")
     elif HAS_LOCAL_MODEL and (hp.model_name_or_path == "microsoft/VibeVoice-1.5B" or "vibevoice" in hp.model_name_or_path.lower()):
         print("Using local VibeVoice implementation...")
         # For local model, we need to load the config and model differently
@@ -328,11 +338,17 @@ def main():
             print("Falling back to HuggingFace model...")
             # Fallback to HuggingFace
             tokenizer = AutoTokenizer.from_pretrained(hp.model_name_or_path, use_fast=True)
-            model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+            if HAS_PEFT:
+                model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto")
     else:
         # Standard HuggingFace model loading
         tokenizer = AutoTokenizer.from_pretrained(hp.model_name_or_path, use_fast=True)
-        model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+        if HAS_PEFT:
+            model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto")
     
     # ensure special tokens for acoustic placeholders exist
     if "<|acoustic|>" not in tokenizer.get_vocab():
@@ -345,7 +361,7 @@ def main():
     model.config.use_cache = False  # ensure gradients where needed
 
     # optionally prepare for QLoRA / k-bit + LoRA
-    if hp.use_qlora:
+    if hp.use_qlora and HAS_PEFT:
         print("Preparing model for k-bit and LoRA (QLoRA)...")
         model = prepare_model_for_kbit_training(model)
         peft_config = LoraConfig(
@@ -357,6 +373,9 @@ def main():
             task_type="CAUSAL_LM"
         )
         model = get_peft_model(model, peft_config)
+    elif hp.use_qlora and not HAS_PEFT:
+        print("Warning: QLoRA requested but PEFT not available. Continuing without QLoRA...")
+        hp.use_qlora = False
 
     # freeze LLM except peft adapters
     for n, p in model.named_parameters():
@@ -506,7 +525,7 @@ def main():
                 if accelerator.unwrap_model(diffusion) is not None:
                     torch.save(accelerator.unwrap_model(diffusion).state_dict(), os.path.join(save_path, "diffusion_raw.pt"))
             try:
-                if hp.use_qlora:
+                if hp.use_qlora and HAS_PEFT:
                     model.save_pretrained(save_path)
                 else:
                     accelerator.unwrap_model(model).save_pretrained(save_path)
@@ -518,7 +537,7 @@ def main():
         final_path = os.path.join(hp.out_dir, "final")
         os.makedirs(final_path, exist_ok=True)
         torch.save(accelerator.unwrap_model(diffusion).state_dict(), os.path.join(final_path, "diffusion_final.pt"))
-        if hp.use_qlora:
+        if hp.use_qlora and HAS_PEFT:
             model.save_pretrained(final_path)
         else:
             accelerator.unwrap_model(model).save_pretrained(final_path)
