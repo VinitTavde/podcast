@@ -35,7 +35,7 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import bitsandbytes as bnb
 
-# Try to import repo processor (safe fallback)
+# Try to import repo processor and model (safe fallback)
 try:
     # repo likely provides a processor with encode_audio / encode_text methods
     from processor.vibevoice_processor import VibeVoiceProcessor  # type: ignore
@@ -43,6 +43,16 @@ try:
 except Exception:
     VibeVoiceProcessor = None
     HAS_REPO_PROCESSOR = False
+
+# Try to import local VibeVoice model classes
+try:
+    from modular.modeling_vibevoice import VibeVoiceForConditionalGeneration, VibeVoiceConfig
+    from modular.configuration_vibevoice import VibeVoiceConfig
+    HAS_LOCAL_MODEL = True
+except Exception:
+    VibeVoiceForConditionalGeneration = None
+    VibeVoiceConfig = None
+    HAS_LOCAL_MODEL = False
 
 # -------------------------
 # ----- utils & config ----
@@ -238,8 +248,14 @@ def main():
     processor = None
     if HAS_REPO_PROCESSOR:
         try:
-            processor = VibeVoiceProcessor()  # many processors have zero-arg constructor
-        except Exception:
+            # Try to load processor from local path first
+            if os.path.exists("processor"):
+                processor = VibeVoiceProcessor.from_pretrained(".")
+                print("Loaded local VibeVoice processor.")
+            else:
+                processor = VibeVoiceProcessor()  # many processors have zero-arg constructor
+        except Exception as e:
+            print(f"Failed to load local processor: {e}")
             # try other ways to instantiate: load from HF path if present
             try:
                 processor = VibeVoiceProcessor.from_pretrained(hp.model_name_or_path)
@@ -253,7 +269,37 @@ def main():
 
     # --- Load LLM (decoder-only) ---
     print("Loading LLM:", hp.model_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(hp.model_name_or_path, use_fast=True)
+    
+    # Check if we should use local model or HuggingFace model
+    if HAS_LOCAL_MODEL and (hp.model_name_or_path == "microsoft/VibeVoice-1.5B" or "vibevoice" in hp.model_name_or_path.lower()):
+        print("Using local VibeVoice implementation...")
+        # For local model, we need to load the config and model differently
+        try:
+            # Try to load from a local checkpoint or create a default config
+            if os.path.exists(hp.model_name_or_path):
+                # Local path - load config and model
+                config = VibeVoiceConfig.from_pretrained(hp.model_name_or_path)
+                model = VibeVoiceForConditionalGeneration.from_pretrained(hp.model_name_or_path, config=config)
+            else:
+                # Create default config for local model
+                print("Creating default VibeVoice config...")
+                config = VibeVoiceConfig()
+                model = VibeVoiceForConditionalGeneration(config)
+            
+            # Load tokenizer from the decoder config (Qwen2)
+            tokenizer = AutoTokenizer.from_pretrained(config.decoder_config.name_or_path, use_fast=True)
+            
+        except Exception as e:
+            print(f"Failed to load local VibeVoice model: {e}")
+            print("Falling back to HuggingFace model...")
+            # Fallback to HuggingFace
+            tokenizer = AutoTokenizer.from_pretrained(hp.model_name_or_path, use_fast=True)
+            model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+    else:
+        # Standard HuggingFace model loading
+        tokenizer = AutoTokenizer.from_pretrained(hp.model_name_or_path, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+    
     # ensure special tokens for acoustic placeholders exist
     if "<|acoustic|>" not in tokenizer.get_vocab():
         try:
@@ -262,7 +308,6 @@ def main():
             pass
 
     print("Loading model (may be large)...")
-    model = AutoModelForCausalLM.from_pretrained(hp.model_name_or_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
     model.config.use_cache = False  # ensure gradients where needed
 
     # optionally prepare for QLoRA / k-bit + LoRA
@@ -294,10 +339,23 @@ def main():
             print("Loaded diffusion_head from model object.")
         except Exception:
             diffusion = None
+    elif HAS_LOCAL_MODEL and hasattr(model, "model") and hasattr(model.model, "prediction_head"):
+        try:
+            diffusion = model.model.prediction_head
+            print("Loaded prediction_head from local VibeVoice model.")
+        except Exception:
+            diffusion = None
 
     if diffusion is None:
         print("Diffusion head not found on model; creating local SmallConditionalUNet...")
-        diffusion = SmallConditionalUNet(latent_dim=hp.latent_dim, cond_dim=model.config.hidden_size)
+        # Get hidden size from model config
+        if hasattr(model, "config") and hasattr(model.config, "hidden_size"):
+            hidden_size = model.config.hidden_size
+        elif hasattr(model, "config") and hasattr(model.config, "decoder_config"):
+            hidden_size = model.config.decoder_config.hidden_size
+        else:
+            hidden_size = 768  # default
+        diffusion = SmallConditionalUNet(latent_dim=hp.latent_dim, cond_dim=hidden_size)
 
     # Move diffusion to float32/float16 appropriately (accelerate will handle device)
     # Create dataset & dataloader
