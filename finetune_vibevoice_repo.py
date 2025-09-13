@@ -23,6 +23,8 @@ import argparse
 import json
 import math
 import random
+import signal
+import sys
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -200,6 +202,15 @@ def q_sample(z0, betas, t, device):
     return z_t, noise
 
 # -------------------------
+# ------- timeout handler --
+# -------------------------
+class TimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Model initialization timed out")
+
+# -------------------------
 # ------- main -------------
 # -------------------------
 def main():
@@ -219,6 +230,7 @@ def main():
     parser.add_argument("--max_text_len", type=int, default=2048)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--load_diffusion_from_model", action="store_true")
+    parser.add_argument("--use_simple_model", action="store_true", help="Use a simple language model instead of full VibeVoice for faster initialization")
     args = parser.parse_args()
 
     hp = HParams(
@@ -271,7 +283,13 @@ def main():
     print("Loading LLM:", hp.model_name_or_path)
     
     # Check if we should use local model or HuggingFace model
-    if HAS_LOCAL_MODEL and (hp.model_name_or_path == "microsoft/VibeVoice-1.5B" or "vibevoice" in hp.model_name_or_path.lower()):
+    if args.use_simple_model:
+        print("Using simple language model for faster initialization...")
+        # Use a simple Qwen2 model instead of full VibeVoice
+        simple_model_path = "Qwen/Qwen2.5-1.5B"  # or another lightweight model
+        tokenizer = AutoTokenizer.from_pretrained(simple_model_path, use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(simple_model_path, trust_remote_code=True, device_map="auto", load_in_8bit=True)
+    elif HAS_LOCAL_MODEL and (hp.model_name_or_path == "microsoft/VibeVoice-1.5B" or "vibevoice" in hp.model_name_or_path.lower()):
         print("Using local VibeVoice implementation...")
         # For local model, we need to load the config and model differently
         try:
@@ -284,7 +302,23 @@ def main():
                 # Create default config for local model
                 print("Creating default VibeVoice config...")
                 config = VibeVoiceConfig()
-                model = VibeVoiceForConditionalGeneration(config)
+                print("Config created. Initializing model components...")
+                print("This may take a few minutes as it initializes acoustic/semantic tokenizers and language model...")
+                
+                # Set up timeout for model initialization (5 minutes)
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(300)  # 5 minutes timeout
+                
+                try:
+                    model = VibeVoiceForConditionalGeneration(config)
+                    signal.alarm(0)  # Cancel timeout
+                    print("Model initialization completed!")
+                except TimeoutError:
+                    signal.alarm(0)  # Cancel timeout
+                    print("Model initialization timed out after 5 minutes.")
+                    print("This might be due to memory constraints or slow initialization.")
+                    print("Try using --use_simple_model flag for faster initialization.")
+                    raise
             
             # Load tokenizer from the decoder config (Qwen2)
             tokenizer = AutoTokenizer.from_pretrained(config.decoder_config.name_or_path, use_fast=True)
